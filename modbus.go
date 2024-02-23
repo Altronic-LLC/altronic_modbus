@@ -19,6 +19,8 @@ func (me Error) Error() (s string) {
 }
 
 const (
+	fcReadSlaveId                uint8 = 0x11
+
 	// coils
 	fcReadCoils                  uint8 = 0x01
 	fcWriteSingleCoil            uint8 = 0x05

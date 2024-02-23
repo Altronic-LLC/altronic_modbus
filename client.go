@@ -876,6 +876,63 @@ func (mc *ModbusClient) WriteRawBytes(addr uint16, values []byte) (err error) {
 	return
 }
 
+// Read function 17 and parse result
+func (mc *ModbusClient) ParseFunction17() (description string, err error) {
+	var bytes	[]byte
+
+	bytes, err	= mc.ReadFunction17()
+	if err != nil {
+		return
+	}
+
+	// format the function 17 description
+	description	= fmt.Sprintf("%v,%v V%v.%v %v %v", bytes[0], bytes[1], bytes[2], bytes[3], string(bytes[4:12]), string(bytes[12:]))
+
+	return
+}
+
+// Read function code 17
+func (mc *ModbusClient) ReadFunction17() (bytes []byte, err error) {
+	var req		*pdu
+	var res		*pdu
+
+	mc.lock.Lock()
+	defer mc.lock.Unlock()
+
+	// create and fill in the request object
+	req	= &pdu{
+		unitId:	      mc.unitId,
+		functionCode: fcReadSlaveId,
+	}
+
+	// run the request across the transport and wait for a response
+	res, err	= mc.executeRequest(req)
+	if err != nil {
+		return
+	}
+
+	// validate the response code
+	switch {
+	case res.functionCode == req.functionCode:
+		// remove the byte count field from the returned slice
+		bytes = res.payload[1:]
+
+	case res.functionCode == (req.functionCode | 0x80):
+		if len(res.payload) != 1 {
+			err	= ErrProtocolError
+			return
+		}
+
+		err	= mapExceptionCodeToError(res.payload[0])
+
+	default:
+		err	= ErrProtocolError
+		mc.logger.Warningf("unexpected response code (%v)", res.functionCode)
+	}
+
+	return
+}
+
 /*** unexported methods ***/
 // Reads one or multiple 16-bit registers (function code 03 or 04) as bytes.
 func (mc *ModbusClient) readBytes(addr uint16, quantity uint16, regType RegType, observeEndianness bool) (values []byte, err error) {

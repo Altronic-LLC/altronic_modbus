@@ -219,6 +219,7 @@ func (rt *rtuTransport) assembleRTUFrame(p *pdu) (adu []byte) {
 // Computes the expected length of a modbus RTU response.
 func expectedResponseLenth(responseCode uint8, responseLength uint8) (byteCount int, err error) {
 	switch responseCode {
+	case fcReadSlaveId:                   byteCount = int(responseLength)
 	case fcReadHoldingRegisters,
 	     fcReadInputRegisters,
 	     fcReadCoils,
