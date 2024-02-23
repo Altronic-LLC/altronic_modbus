@@ -21,6 +21,7 @@ type serialPortConfig struct {
 	DataBits	uint
 	Parity		uint
 	StopBits	uint
+	RS485		serial.RS485Config
 }
 
 func newSerialPortWrapper(conf *serialPortConfig) (spw *serialPortWrapper) {
@@ -47,6 +48,7 @@ func (spw *serialPortWrapper) Open() (err error) {
 		Parity:		parity,
 		StopBits:	int(spw.conf.StopBits),
 		Timeout:	10 * time.Millisecond,
+		RS485:		spw.conf.RS485,
 	})
 
 	return
