@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/goburrow/serial"
 )
 
 type RegType	uint
@@ -47,6 +49,8 @@ type ClientConfiguration struct {
 	StopBits      uint
 	// Timeout sets the request timeout value
 	Timeout       time.Duration
+	// RS485 config sets the optional platform independent RS485 config (rtu only)
+	RS485         serial.RS485Config
 	// TLSClientCert sets the client-side TLS key pair (tcp+tls only)
 	TLSClientCert *tls.Certificate
 	// TLSRootCAs sets the list of CA certificates used to authenticate
@@ -213,6 +217,7 @@ func (mc *ModbusClient) Open() (err error) {
 			DataBits:	mc.conf.DataBits,
 			Parity:		mc.conf.Parity,
 			StopBits:	mc.conf.StopBits,
+			RS485:		mc.conf.RS485,
 		})
 
 		// open the serial device
