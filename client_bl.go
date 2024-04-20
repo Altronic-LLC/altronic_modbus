@@ -310,3 +310,61 @@ func (mc *ModbusClient) BootloaderReadApp(blOffset uint32, blLength uint8) (blDa
 	return
 
 }
+
+func (mc *ModbusClient) BootloaderWriteFileSpec(blfwsz uint32, blfwcrc uint32) (err error) {
+	var req *pdu
+	var res *pdu
+
+	var blOffset uint32 = 0x0000
+	var blLength uint8 = 0x8
+
+	mc.lock.Lock()
+	defer mc.lock.Unlock()
+
+	// create and fill in the request object
+	req = &pdu{
+		unitId:       mc.unitId,
+		functionCode: fcBootloader,
+	}
+	req.payload = append(req.payload, blCmdWrApp)
+
+	b := uint32ToBytes(BIG_ENDIAN, HIGH_WORD_FIRST, blOffset) // offset
+	req.payload = append(req.payload, b[1], b[2], b[3])
+
+	req.payload = append(req.payload, blLength)
+
+	b = uint32ToBytes(BIG_ENDIAN, HIGH_WORD_FIRST, blfwsz) // offset
+
+	req.payload = append(req.payload, b[1], b[2], b[3], b[4])
+
+	b = uint32ToBytes(BIG_ENDIAN, HIGH_WORD_FIRST, blfwcrc) // offset
+
+	req.payload = append(req.payload, b[1], b[2], b[3], b[4])
+
+	// run the request across the transport and wait for a response
+	res, err = mc.executeRequest(req)
+	if err != nil {
+		return
+	}
+
+	// validate the response code
+	switch {
+	case res.functionCode == req.functionCode:
+		return
+
+	case res.functionCode == (req.functionCode | 0x80):
+		if len(res.payload) != 1 {
+			err = ErrProtocolError
+			return
+		}
+
+		err = mapExceptionCodeToError(res.payload[0])
+
+	default:
+		err = ErrProtocolError
+		mc.logger.Warningf("unexpected response code (%v)", res.functionCode)
+	}
+
+	return
+
+}
