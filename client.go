@@ -234,8 +234,8 @@ func (mc *ModbusClient) Open() (err error) {
 			spw, mc.conf.URL, mc.conf.Speed, mc.conf.Timeout, mc.conf.Logger)
 
 	case modbusRTUOverTCP:
-		// connect to the remote host
-		sock, err = net.DialTimeout("tcp", mc.conf.URL, 5 * time.Second)
+		// connect to the remote host (honor configured timeout, default 5s)
+		sock, err = net.DialTimeout("tcp", mc.conf.URL, dialTimeout(mc.conf.Timeout))
 		if err != nil {
 			return
 		}
@@ -250,7 +250,7 @@ func (mc *ModbusClient) Open() (err error) {
 	case modbusRTUOverUDP:
 		// open a socket to the remote host (note: no actual connection is
 		// being made as UDP is connection-less)
-		sock, err = net.DialTimeout("udp", mc.conf.URL, 5 * time.Second)
+		sock, err = net.DialTimeout("udp", mc.conf.URL, dialTimeout(mc.conf.Timeout))
 		if err != nil {
 			return
 		}
@@ -263,8 +263,8 @@ func (mc *ModbusClient) Open() (err error) {
 			mc.conf.URL, mc.conf.Speed, mc.conf.Timeout, mc.conf.Logger)
 
 	case modbusTCP:
-		// connect to the remote host
-		sock, err = net.DialTimeout("tcp", mc.conf.URL, 5 * time.Second)
+		// connect to the remote host (honor configured timeout, default 5s)
+		sock, err = net.DialTimeout("tcp", mc.conf.URL, dialTimeout(mc.conf.Timeout))
 		if err != nil {
 			return
 		}
@@ -306,7 +306,7 @@ func (mc *ModbusClient) Open() (err error) {
 	case modbusTCPOverUDP:
 		// open a socket to the remote host (note: no actual connection is
 		// being made as UDP is connection-less)
-		sock, err = net.DialTimeout("udp", mc.conf.URL, 5 * time.Second)
+		sock, err = net.DialTimeout("udp", mc.conf.URL, dialTimeout(mc.conf.Timeout))
 		if err != nil {
 			return
 		}
@@ -1265,4 +1265,14 @@ func (mc *ModbusClient) executeRequest(req *pdu) (res *pdu, err error) {
 	}
 
 	return
+}
+
+// dialTimeout returns the TCP/UDP dial timeout to use for Client.Open().
+// When the caller sets conf.Timeout, use it directly so slow hosts fail
+// fast instead of blocking the caller for 5 seconds per attempt.
+func dialTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return 5 * time.Second
 }
