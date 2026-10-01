@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"time"
 )
 
@@ -25,6 +26,13 @@ type rtuLink interface {
 	Read([]byte) (int, error)
 	Write([]byte) (int, error)
 	SetDeadline(time.Time) error
+}
+
+// rxFlusher is implemented by links which can drop the contents of their rx
+// buffer without waiting for more data. flushRx returns the number of bytes
+// dropped.
+type rxFlusher interface {
+	flushRx() int
 }
 
 // Returns a new RTU transport.
@@ -60,18 +68,24 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 	var ts time.Time
 	var t time.Duration
 	var n int
-
-	// set an i/o deadline on the link
-	err = rt.link.SetDeadline(time.Now().Add(rt.timeout))
-	if err != nil {
-		return
-	}
+	var stale *pdu
 
 	// if the line was active less than 3.5 char times ago,
 	// let t3.5 expire before transmitting
 	t = time.Since(rt.lastActivity.Add(rt.t35))
 	if t < 0 {
 		time.Sleep(t * (-1))
+	}
+
+	// RTU has no transaction id: whatever is already in the rx buffer (e.g. a
+	// late reply to a request which timed out) would be read as the answer to
+	// this request, so drop it right before transmitting
+	rt.flushRx()
+
+	// set an i/o deadline on the link (after the flush, which may move it)
+	err = rt.link.SetDeadline(time.Now().Add(rt.timeout))
+	if err != nil {
+		return
 	}
 
 	ts = time.Now()
@@ -92,7 +106,25 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 	time.Sleep(rt.lastActivity.Add(rt.t35).Sub(time.Now()))
 
 	// read the response back from the wire
-	res, err = rt.readRTUFrame()
+	for {
+		res, err = rt.readRTUFrame()
+		if err != nil || isResponseTo(req, res) {
+			break
+		}
+
+		// a valid frame which cannot be the answer (a late reply which
+		// arrived after the flush): keep listening for the real one
+		rt.logger.Warningf("skipping frame from unit %v, function 0x%02x "+
+			"(expected unit %v, function 0x%02x)",
+			res.unitId, res.functionCode, req.unitId, req.functionCode)
+		stale = res
+	}
+
+	// nothing better came in: hand the mismatched frame to the client, which
+	// rejects it with the same error as it always has
+	if stale != nil && (err == ErrRequestTimedOut || os.IsTimeout(err)) {
+		res, err = stale, nil
+	}
 
 	if err == ErrBadCRC || err == ErrProtocolError || err == ErrShortFrame {
 		// wait for and flush any data coming off the link to allow
@@ -107,6 +139,36 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 	}
 
 	return
+}
+
+// Empties the link's rx buffer ahead of a request.
+func (rt *rtuTransport) flushRx() {
+	var n int
+
+	if f, ok := rt.link.(rxFlusher); ok {
+		// serial ports: no waiting, so inter-frame timing is unaffected
+		n = f.flushRx()
+	} else {
+		n = discard(rt.link)
+	}
+
+	if n > 0 {
+		rt.logger.Warningf("discarded %v stale byte(s) before sending a request", n)
+	}
+
+	return
+}
+
+// Returns true if res may be the response to req: same function code (or its
+// exception), from the same unit (exceptions may also come from gateway
+// devices, which use unit id #255).
+func isResponseTo(req *pdu, res *pdu) bool {
+	if res.functionCode == req.functionCode {
+		return res.unitId == req.unitId
+	}
+
+	return res.functionCode == (req.functionCode|0x80) &&
+		(res.unitId == req.unitId || res.unitId == 0xff)
 }
 
 // Reads a request from the rtu link.
@@ -252,14 +314,15 @@ func expectedResponseLenth(responseCode uint8, responseLength uint8) (byteCount 
 	return
 }
 
-// Discards the contents of the link's rx buffer, eating up to 1kB of data.
+// Discards the contents of the link's rx buffer, eating up to 1kB of data, and
+// returns the number of bytes discarded.
 // Note that on a serial line, this call may block for up to serialConf.Timeout
 // i.e. 10ms.
-func discard(link rtuLink) {
+func discard(link rtuLink) (n int) {
 	var rxbuf = make([]byte, 1024)
 
 	link.SetDeadline(time.Now().Add(500 * time.Microsecond))
-	io.ReadFull(link, rxbuf)
+	n, _ = io.ReadFull(link, rxbuf)
 
 	return
 }
