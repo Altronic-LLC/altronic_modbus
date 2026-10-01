@@ -251,4 +251,18 @@ Gateway, real serial path over a PTY at 115200 baud
 The last row is why the serial flush goes to the descriptor instead of
 through `port.Read`.
 
-Not done here: no run against real RS-485 hardware.
+On real RS-485 hardware (ACM lab unit, linux/arm64, 38400 8N1, port timeout
+250 ms, slave answering 330 ms after the request), 2026-10-01: before the fix
+74 of 76 samples showed one register range's data under the other range's
+registers, with no error; with the fix 0 of 76, the reads time out instead.
+The library logged `discarded 9 stale byte(s)` and `skipping frame from unit
+33 ... (expected unit 1 ...)`. Throughput with a prompt slave is unchanged
+(19.9 requests/s before and after), so the non-blocking flush works on the
+unit's tty driver. Details: MDI-Gateway `docs/2026-10-01-rtu-flush-late-replies.md`.
+
+The remaining limit was also seen there: two same-shaped requests sent back to
+back, with a reply late by less than the gap between them, still give one wrong
+read.
+
+Note for callers: the warnings go to the client's `Logger`; without one they
+go to standard output.
