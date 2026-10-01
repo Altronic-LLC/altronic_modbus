@@ -208,7 +208,7 @@ the old code is after request #2 was written.
 
 ## Results
 
-macOS arm64, Go 1.26.5. Not run on real RS-485 hardware in this step.
+macOS arm64, Go 1.26.5. Real RS-485 hardware: see the end of this section.
 
 Old code (`main` b4e518b), new tests only - all six fail:
 
@@ -253,3 +253,23 @@ late on the first request (`TestRTULateReplyAfterNextRequest`):
 |---|---|
 | main | returns A's registers, no error |
 | this fix | returns its own registers; it was sent 201 ms after it was asked for (when the late reply was in), not after the 1 s window |
+
+### On real RS-485 hardware (2026-10-01)
+
+Lab unit, 38400 8N1, port timeout 250 ms, the gateway built with this file
+vendored (details and method in the gateway's
+`docs/2026-10-01-rtu-late-reply-after-next-request.md`).
+
+| slave 80 ms past the timeout, two same-shaped reads back to back | old | this fix |
+|---|---|---|
+| Live Data Viewer openings showing the other range's data | 6/6 | 0/6 |
+| second `/fc` read returning the first read's data | 10/12 | 0/12 (all `request timed out`) |
+
+Library output on the unit's tty during the late step: 21 x `dropped a late
+reply from unit 33, function 0x03`.
+
+Healthy device on the same port, polled as fast as it answers: 19.8-20.0
+requests/s before and after; 19.3-19.5 requests/s with a dead neighbour in
+steady state, before and after. When a neighbour stops answering, its second
+and third request are held about 200 ms each (the bus is idle meanwhile):
+0.40-0.45 s once per outage, then the old timings.
