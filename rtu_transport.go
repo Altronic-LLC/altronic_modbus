@@ -10,7 +10,23 @@ import (
 
 const (
 	maxRTUFrameLength int = 256
+	// longest time the line is kept waiting for a reply after its request
+	// timed out (the settle window is the timeout, up to this)
+	maxRTUSettle time.Duration = 1 * time.Second
+	// a unit which has missed more requests in a row than this is absent:
+	// requests to it are no longer held back for the settle window
+	rtuAbsentAfter int = 2
 )
+
+// What the master knows about a unit whose requests have timed out.
+type rtuUnitState struct {
+	// replies to timed out requests which may still arrive
+	owed int
+	// when the last of them is given up
+	owedUntil time.Time
+	// requests in a row which got no frame back from the unit
+	misses int
+}
 
 type rtuTransport struct {
 	logger       *logger
@@ -19,6 +35,8 @@ type rtuTransport struct {
 	lastActivity time.Time
 	t35          time.Duration
 	t1           time.Duration
+	settle       time.Duration
+	units        map[uint8]*rtuUnitState
 }
 
 type rtuLink interface {
@@ -42,6 +60,11 @@ func newRTUTransport(link rtuLink, addr string, speed uint, timeout time.Duratio
 		link:    link,
 		timeout: timeout,
 		t1:      serialCharTime(speed),
+		settle:  timeout,
+	}
+
+	if rt.settle > maxRTUSettle {
+		rt.settle = maxRTUSettle
 	}
 
 	if speed >= 19200 {
@@ -69,6 +92,10 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 	var t time.Duration
 	var n int
 	var stale *pdu
+
+	// RTU has no transaction id: if this unit may still answer a request which
+	// timed out, that reply must be off the line before a new request is sent
+	rt.settleUnit(req.unitId)
 
 	// if the line was active less than 3.5 char times ago,
 	// let t3.5 expire before transmitting
@@ -108,7 +135,17 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 	// read the response back from the wire
 	for {
 		res, err = rt.readRTUFrame()
-		if err != nil || isResponseTo(req, res) {
+		if err != nil {
+			break
+		}
+
+		// a late reply to a request which timed out: never the answer, even
+		// if it has the right unit id, function and length
+		if rt.isOwedReply(res) {
+			continue
+		}
+
+		if isResponseTo(req, res) {
 			break
 		}
 
@@ -118,6 +155,11 @@ func (rt *rtuTransport) ExecuteRequest(req *pdu) (res *pdu, err error) {
 			"(expected unit %v, function 0x%02x)",
 			res.unitId, res.functionCode, req.unitId, req.functionCode)
 		stale = res
+	}
+
+	// no answer: the unit owes a reply which may still show up
+	if err == ErrRequestTimedOut || os.IsTimeout(err) {
+		rt.owes(req.unitId)
 	}
 
 	// nothing better came in: hand the mismatched frame to the client, which
@@ -154,6 +196,98 @@ func (rt *rtuTransport) flushRx() {
 
 	if n > 0 {
 		rt.logger.Warningf("discarded %v stale byte(s) before sending a request", n)
+	}
+
+	return
+}
+
+// Books a request to unitId which timed out: its reply may still arrive, for
+// as long as the settle window lasts.
+func (rt *rtuTransport) owes(unitId uint8) {
+	var us *rtuUnitState
+	var now = time.Now()
+
+	us = rt.units[unitId]
+	if us == nil {
+		if rt.units == nil {
+			rt.units = make(map[uint8]*rtuUnitState)
+		}
+		us = &rtuUnitState{}
+		rt.units[unitId] = us
+	}
+
+	// replies which did not come within their window are given up
+	if !now.Before(us.owedUntil) {
+		us.owed = 0
+	}
+
+	us.owed++
+	us.owedUntil = now.Add(rt.settle)
+	us.misses++
+
+	return
+}
+
+// Books a well-formed frame against the unit which sent it. Returns true if
+// that unit still owed a reply to a timed out request: the frame is that late
+// reply and must be dropped.
+func (rt *rtuTransport) isOwedReply(res *pdu) (owed bool) {
+	var us *rtuUnitState
+
+	us = rt.units[res.unitId]
+	if us == nil {
+		return
+	}
+
+	// the unit is alive
+	us.misses = 0
+
+	if us.owed > 0 && time.Now().Before(us.owedUntil) {
+		us.owed--
+		owed = true
+		rt.logger.Warningf("dropped a late reply from unit %v, function 0x%02x",
+			res.unitId, res.functionCode)
+	}
+
+	return
+}
+
+// Quarantine: holds the line until unitId has delivered the replies it owes or
+// the settle window is over, so that the next frame from it can only be the
+// answer to the next request. Returns at once if nothing is owed, or if the
+// unit is absent (a dead unit must not cost bus time; isOwedReply still drops
+// its late reply should it come back).
+func (rt *rtuTransport) settleUnit(unitId uint8) {
+	var us *rtuUnitState
+	var res *pdu
+	var err error
+
+	us = rt.units[unitId]
+	if us == nil {
+		return
+	}
+
+	for us.owed > 0 && us.misses <= rtuAbsentAfter &&
+		time.Now().Before(us.owedUntil) {
+		rt.link.SetDeadline(us.owedUntil)
+
+		// a frame which has started inside the window is read to its end
+		res, err = rt.readRTUFrameWithin(time.Duration(maxRTUFrameLength) * rt.t1)
+		if err == nil {
+			rt.isOwedReply(res)
+			rt.lastActivity = time.Now()
+			continue
+		}
+
+		// silence until the end of the window
+		if err == ErrRequestTimedOut || os.IsTimeout(err) {
+			break
+		}
+
+		// garbage: let it pass and drop it, as after a bad reply
+		time.Sleep(time.Duration(maxRTUFrameLength) * rt.t1)
+		discard(rt.link)
+		rt.lastActivity = time.Now()
 	}
 
 	return
@@ -197,6 +331,15 @@ func (rt *rtuTransport) WriteResponse(res *pdu) (err error) {
 
 // Waits for, reads and decodes a frame from the rtu link.
 func (rt *rtuTransport) readRTUFrame() (res *pdu, err error) {
+	res, err = rt.readRTUFrameWithin(0)
+
+	return
+}
+
+// Same as readRTUFrame, except that if bodyGrace is not zero, a frame whose
+// header came in before the link's deadline gets that much time to come in
+// whole.
+func (rt *rtuTransport) readRTUFrameWithin(bodyGrace time.Duration) (res *pdu, err error) {
 	var rxbuf []byte
 	var byteCount int
 	var bytesNeeded int
@@ -223,6 +366,10 @@ func (rt *rtuTransport) readRTUFrame() (res *pdu, err error) {
 
 	// we need to read 2 additional bytes of CRC after the payload
 	bytesNeeded += 2
+
+	if bodyGrace > 0 {
+		rt.link.SetDeadline(time.Now().Add(bodyGrace))
+	}
 
 	// never read more than the max allowed frame length
 	if byteCount+bytesNeeded > maxRTUFrameLength {
