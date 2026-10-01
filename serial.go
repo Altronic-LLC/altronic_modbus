@@ -15,6 +15,10 @@ type serialPortWrapper struct {
 	deadline	time.Time
 }
 
+// upper bound on how much a single flushRx() call eats, so that a device
+// which never stops talking cannot hold the master in the flush
+const maxSerialFlush	int = 8192
+
 type serialPortConfig struct {
 	Device		string
 	Speed		uint
@@ -85,6 +89,34 @@ func (spw *serialPortWrapper) Read(rxbuf []byte) (cnt int, err error) {
 	// mask serial.ErrTimeout errors from the serial port
 	if err != nil && err == serial.ErrTimeout {
 		err = nil
+	}
+
+	return
+}
+
+// Drops whatever is pending in the serial port's receive buffer and returns
+// how many bytes that was (rxFlusher interface).
+func (spw *serialPortWrapper) flushRx() (cnt int) {
+	var rxbuf	[]byte
+	var n		int
+	var err		error
+	var ok		bool
+
+	// preferred: read the descriptor dry without ever waiting
+	cnt, ok = flushSerialPort(spw.port)
+	if ok {
+		return
+	}
+
+	// otherwise read through the port, which waits up to 10ms (the serial
+	// timeout) once the buffer is empty
+	rxbuf = make([]byte, 1024)
+	for cnt < maxSerialFlush {
+		n, err = spw.port.Read(rxbuf)
+		cnt += n
+		if n <= 0 || err != nil {
+			break
+		}
 	}
 
 	return
